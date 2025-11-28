@@ -1,63 +1,127 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-# Parameters
-Mu_l = 0.1
-Mu_nc = 1/108
-Mu_r = 1/30
+# --- 1. PARAMETERS ---
+Mu_l = 0.1          # 1/10s 
+Mu_nc = 1/108       # Weighted average 
+Mu_r = 1/30         # 1/30s [cite: 44]
 
 # Lambda range (log scale)
-lambdas = np.logspace(-6, -1, 20)
+lambdas = np.logspace(-6, -1, 15) # Reduced points for speed
 
-# --- ANALYTICAL CALCULATIONS ---
+# --- 2. ANALYTICAL MODELS ---
 
 def calc_uptime_ctmc(lam):
-    # Formula derived in report
+    # Matches Equation (3) 
     denom = 1 + lam * (0.6/Mu_l + 0.3/Mu_nc + 0.82/Mu_r)
     pi_N = 1 / denom
+    # Matches Equation (2) critical component
     pi_C = pi_N * (0.82 * lam / Mu_r)
     return 1 - pi_C
 
 def calc_uptime_bdp(lam):
-    # Parameters for BDP
-    lam0 = lam
-    mu1 = 0.03 # Approximation of self-healing (weighted) derived in discussion
-    # Note: To match BDP logic strictly, we use the formula derived:
-    # We need effective lambda1. Let's use the one that makes physical sense
-    # or simply use the CTMC logic forced into linear to show discrepancy.
-    # Let's use the exact BDP formula derived in the LaTeX:
-    # pi2 = pi0 * (lam0 * lam1) / (mu1 * mu2)
-    # This requires defining lam1 and mu1 numerically.
-    # Let's use a simplified BDP curve for visualization that shows the drop.
-    # Uptime BDP is generally strictly lower.
+    # Matches Equations (6) and (7)
+    # We estimate effective rates for the Warning state (W)
+    # W aggregates Latent (60% flow) and Non-Critical (30% flow). Total flow entering W is 0.9*lambda.
     
-    # Using the derived formula structure:
-    # Warning state effective exit rate to Critical:
-    # Weighted average of Latent (0.7) and NC (1.0) flows? 
-    # Let's approximate purely for the plot trend:
-    lambda_1 = 0.05 # average degeneration
-    mu_1 = 0.03     # average healing
+    # Weighting factors
+    w_lat = 0.6 / 0.9
+    w_nc = 0.3 / 0.9
     
-    term1 = lam0 / mu1
-    term2 = (lam0 * lambda_1) / (mu1 * Mu_r)
+    # mu_1 
+    mu_1 = w_lat * (0.3 * Mu_l) + w_nc * 0
+    
+    # lambda_1 
+    lambda_1 = w_lat * (0.7 * Mu_l) + w_nc * Mu_nc
+    
+    mu_2 = Mu_r # Repair rate
+    
+    term1 = lam / mu_1
+    term2 = (lam * lambda_1) / (mu_1 * mu_2)
+    
     pi_0 = 1 / (1 + term1 + term2)
     pi_2 = pi_0 * term2
     return 1 - pi_2
 
-uptime_ctmc = [calc_uptime_ctmc(l) for l in lambdas]
-uptime_bdp = [calc_uptime_bdp(l) for l in lambdas] # This will be lower
+# --- 3. REAL MONTE CARLO SIMULATOR ---
 
-# --- PLOT 1: Uptime Analysis ---
+def run_simulation(lam, max_time=1e6, constant_repair=False):
+    t = 0
+    downtime = 0
+    # State: 0=Normal, 1=Latent, 2=NonCritical, 3=Reboot
+    state = 0 
+    
+    while t < max_time:
+        if state == 0: # Normal
+            # Time to next radiation event
+            dt = np.random.exponential(1/lam)
+            t += dt
+            if t >= max_time: break
+            
+            # Determine type
+            rand = np.random.rand()
+            if rand < 0.1:
+                state = 3 # Direct Critical
+            elif rand < 0.4: # 0.1 + 0.3
+                state = 2 # Non-Critical
+            else:
+                state = 1 # Latent
+                
+        elif state == 1: # Latent
+            # Mean time 10s 
+            dt = np.random.exponential(1/Mu_l)
+            t += dt
+            if t >= max_time: break
+            
+            # Outcome: 30% heal, 70% fail
+            if np.random.rand() < 0.3:
+                state = 0 # Heal (Overwrite)
+            else:
+                state = 3 # Critical
+                
+        elif state == 2: # Non-Critical
+            # Hyper-exponential logic 
+            # 60% mean 60s, 40% mean 180s
+            if np.random.rand() < 0.6:
+                mu_local = 1/60
+            else:
+                mu_local = 1/180
+            
+            dt = np.random.exponential(1/mu_local)
+            t += dt
+            if t >= max_time: break
+            state = 3 # Always leads to reboot
+            
+        elif state == 3: # Reboot (Critical)
+            if constant_repair:
+                dt = 30.0 # Deterministic 
+            else:
+                dt = np.random.exponential(1/Mu_r) # Exponential
+            
+            downtime += dt # Accumulate downtime
+            t += dt
+            state = 0 # Back to Normal 
+
+    return 1 - (downtime / t)
+
+# --- 4. EXECUTION ---
+print("Running Analytics...")
+y_ctmc = [calc_uptime_ctmc(l) for l in lambdas]
+y_bdp = [calc_uptime_bdp(l) for l in lambdas]
+
+print("Running Monte Carlo (Exponential Repair)... This may take a moment.")
+y_sim_exp = [run_simulation(l, max_time=2e5, constant_repair=False) for l in lambdas]
+
+print("Running Monte Carlo (Constant Repair)...")
+y_sim_const = [run_simulation(l, max_time=2e5, constant_repair=True) for l in lambdas]
+
+# --- 5. PLOTTING ---
+
+# Plot 1: Models Comparison
 plt.figure(figsize=(10, 6))
-plt.semilogx(lambdas, uptime_ctmc, label='CTMC (Analytical)', linewidth=2)
-plt.semilogx(lambdas, uptime_bdp, label='BDP (Analytical - Conservative)', linestyle='--', linewidth=2)
-
-# Simulated points (Mock points to represent MC simulation matching CTMC)
-# In a real run, you would loop the discrete event sim here.
-# We add some noise to CTMC to simulate "Simulation"
-sim_points = [y + np.random.normal(0, 0.0001) for y in uptime_ctmc]
-plt.scatter(lambdas[::2], sim_points[::2], color='red', marker='x', label='Monte Carlo Sim', zorder=5)
-
+plt.semilogx(lambdas, y_ctmc, label='CTMC (Analytical)', linewidth=2)
+plt.semilogx(lambdas, y_bdp, label='BDP (Analytical - Conservative)', linestyle='--', linewidth=2)
+plt.scatter(lambdas, y_sim_exp, color='red', marker='x', label='Monte Carlo Sim', zorder=5)
 plt.xlabel(r'Radiation Intensity $\lambda$ (events/s)')
 plt.ylabel('Uptime Probability')
 plt.title('Uptime Analysis: Analytical vs Simulation')
@@ -66,12 +130,10 @@ plt.legend()
 plt.savefig('uptime_analysis.png')
 plt.show()
 
-# --- PLOT 2: Constant vs Exp ---
+# Plot 2: Repair Distribution Impact
 plt.figure(figsize=(10, 6))
-plt.semilogx(lambdas, uptime_ctmc, label='Exponential Repair (Sim)', linewidth=2)
-# Constant repair usually yields same availability, maybe slight variations in convergence
-plt.scatter(lambdas[::2], sim_points[::2], color='green', marker='o', label='Constant Repair (Sim)', zorder=5)
-
+plt.semilogx(lambdas, y_sim_exp, label='Exponential Repair (Sim)', linewidth=2)
+plt.scatter(lambdas, y_sim_const, color='green', marker='o', label='Constant Repair (Sim)', zorder=5)
 plt.xlabel(r'Radiation Intensity $\lambda$ (events/s)')
 plt.ylabel('Uptime Probability')
 plt.title('Impact of Reboot Time Distribution on Uptime')
